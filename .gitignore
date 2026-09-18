@@ -1,0 +1,19 @@
+# build products
+/flush_test
+/spectre_v1_fr
+/benign_compute
+/benign_cache
+/benign_syscall
+/benign_flush
+/benign_proc_mix
+/benign_privdrop
+/attack_setuid_exhaust
+
+# simulator outputs and environments
+m5out*/
+stu-results/
+results/*/
+venv/
+__pycache__/
+*.pyc
+gem5/

@@ -1,0 +1,5 @@
+# -*- mode:python -*-
+Import('*')
+
+SimObject('SecurityTelemetryUnit.py', sim_objects=['SecurityTelemetryUnit'])
+Source('security_telemetry_unit.cc')

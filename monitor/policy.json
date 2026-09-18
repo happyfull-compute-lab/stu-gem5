@@ -1,0 +1,18 @@
+{
+  "policies": [
+    {
+      "policy_id": "P-SPECTRE-FR-1",
+      "all": [
+        {"metric": "cleanInvalidPerMinst", "op": ">", "value": 5000},
+        {"metric": "squashedIssuedPerMinst", "op": ">", "value": 1000}
+      ]
+    },
+    {
+      "policy_id": "P-SETUID-EXHAUST-1",
+      "all": [
+        {"metric": "cloneSyscallsPerMinst", "op": ">", "value": 100},
+        {"metric": "setuidSyscallsPerMinst", "op": ">", "value": 0}
+      ]
+    }
+  ]
+}

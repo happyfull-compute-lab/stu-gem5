@@ -1,0 +1,650 @@
+diff --git a/src/arch/x86/linux/se_workload.cc b/src/arch/x86/linux/se_workload.cc
+index c896134..2818547 100644
+--- a/src/arch/x86/linux/se_workload.cc
++++ b/src/arch/x86/linux/se_workload.cc
+@@ -116,6 +116,8 @@ EmuLinux::syscall(ThreadContext *tc)
+     process->Process::syscall(tc);
+
+     RegVal rax = tc->getReg(int_reg::Rax);
++    process->ppSyscallEntry->notify(
++        {static_cast<int64_t>(rax), 0, true});
+     if (dynamic_cast<X86_64Process *>(process)) {
+         syscallDescs64.get(rax)->doSyscall(tc);
+     } else if (auto *proc32 = dynamic_cast<I386Process *>(process)) {
+@@ -155,6 +157,7 @@ void
+ EmuLinux::pageFault(ThreadContext *tc)
+ {
+     Process *p = tc->getProcessPtr();
++    p->ppFault->notify(1);
+     if (!p->fixupFault(tc->readMiscReg(misc_reg::Cr2))) {
+         SETranslatingPortProxy proxy(tc);
+         // at this point we should have 6 values on the interrupt stack
+diff --git a/src/arch/x86/linux/syscall_tbl32.cc b/src/arch/x86/linux/syscall_tbl32.cc
+index bf5d03e..6b3c742 100644
+--- a/src/arch/x86/linux/syscall_tbl32.cc
++++ b/src/arch/x86/linux/syscall_tbl32.cc
+@@ -73,7 +73,7 @@ SyscallDescTable<EmuLinux::SyscallABI32> EmuLinux::syscallDescs32 = {
+     {  20, "getpid", getpidFunc },
+     {  21, "mount" },
+     {  22, "umount" },
+-    {  23, "setuid" },
++    {  23, "setuid", setuidFunc },
+     {  24, "getuid", getuidFunc },
+     {  25, "stime" },
+     {  26, "ptrace" },
+@@ -267,7 +267,7 @@ SyscallDescTable<EmuLinux::SyscallABI32> EmuLinux::syscallDescs32 = {
+     { 210, "setresgid32" },
+     { 211, "getresgid32" },
+     { 212, "chown32" },
+-    { 213, "setuid32" },
++    { 213, "setuid32", setuidFunc },
+     { 214, "setgid32" },
+     { 215, "setfsuid32" },
+     { 216, "setfsgid32" },
+diff --git a/src/arch/x86/linux/syscall_tbl64.cc b/src/arch/x86/linux/syscall_tbl64.cc
+index 1c3eebd..cd19555 100644
+--- a/src/arch/x86/linux/syscall_tbl64.cc
++++ b/src/arch/x86/linux/syscall_tbl64.cc
+@@ -159,7 +159,7 @@ SyscallDescTable<EmuLinux::SyscallABI64> EmuLinux::syscallDescs64 = {
+     { 102, "getuid", getuidFunc },
+     { 103, "syslog" },
+     { 104, "getgid", getgidFunc },
+-    { 105, "setuid" },
++    { 105, "setuid", setuidFunc },
+     { 106, "setgid" },
+     { 107, "geteuid", geteuidFunc },
+     { 108, "getegid", getegidFunc },
+diff --git a/src/arch/x86/linux/syscalls.cc b/src/arch/x86/linux/syscalls.cc
+index df80ec1..48d6c27 100644
+--- a/src/arch/x86/linux/syscalls.cc
++++ b/src/arch/x86/linux/syscalls.cc
+@@ -96,6 +96,14 @@ archPrctlFunc(SyscallDesc *desc, ThreadContext *tc, int code, uint64_t addr)
+     }
+ }
+
++SyscallReturn
++setuidFunc(SyscallDesc *desc, ThreadContext *tc, uid_t uid)
++{
++    // SE mode does not model credentials; reject the request without
++    // changing the simulated or host process identity.
++    return -EPERM;
++}
++
+ SyscallReturn
+ setThreadArea32Func(SyscallDesc *desc, ThreadContext *tc,
+                     VPtr<UserDesc32> userDesc)
+diff --git a/src/arch/x86/linux/syscalls.hh b/src/arch/x86/linux/syscalls.hh
+index 91d57f5..2eaf82c 100644
+--- a/src/arch/x86/linux/syscalls.hh
++++ b/src/arch/x86/linux/syscalls.hh
+@@ -45,6 +45,8 @@ SyscallReturn unameFunc(SyscallDesc *desc, ThreadContext *tc,
+ SyscallReturn archPrctlFunc(SyscallDesc *desc, ThreadContext *tc,
+                             int code, uint64_t addr);
+
++SyscallReturn setuidFunc(SyscallDesc *desc, ThreadContext *tc, uid_t uid);
++
+ BitUnion32(UserDescFlags)
+     Bitfield<0> seg_32bit;
+     Bitfield<2, 1> contents;
+diff --git a/src/arch/x86/tlb.cc b/src/arch/x86/tlb.cc
+index c7d144b..b793b22 100644
+--- a/src/arch/x86/tlb.cc
++++ b/src/arch/x86/tlb.cc
+@@ -560,12 +560,13 @@ TLB::translateTiming(const RequestPtr &req, ThreadContext *tc,
+     bool delayedResponse;
+     assert(translation);
+     // CLFLUSHOPT/WB/FLUSH should be treated as read for protection checks
++    BaseMMU::Mode orig_mode = mode;
+     if (req->isCacheClean())
+         mode = BaseMMU::Read;
+     Fault fault =
+         TLB::translate(req, tc, translation, mode, delayedResponse, true);
+     if (!delayedResponse)
+-        translation->finish(fault, req, tc, mode);
++        translation->finish(fault, req, tc, orig_mode);
+     else
+         translation->markDelayed();
+ }
+diff --git a/src/cpu/o3/commit.cc b/src/cpu/o3/commit.cc
+index 1752fdc..97e71a2 100644
+--- a/src/cpu/o3/commit.cc
++++ b/src/cpu/o3/commit.cc
+@@ -833,6 +833,7 @@ Commit::commit()
+                      toIEW->commitInfo[tid].branchTaken = true;
+                 }
+                 ++stats.branchMispredicts;
++                cpu->ppCommitBranchMispredict->notify(1);
+             }
+
+             set(toIEW->commitInfo[tid].pc, fromIEW->pc[tid]);
+@@ -1352,6 +1353,7 @@ Commit::updateComInstStats(const DynInstPtr &inst)
+     if (!inst->isMicroop() || inst->isLastMicroop()) {
+         cpu->commitStats[tid]->numInsts++;
+         cpu->baseStats.numInsts++;
++        cpu->ppCommittedInst->notify(1);
+     }
+     cpu->commitStats[tid]->numOps++;
+
+diff --git a/src/cpu/o3/cpu.cc b/src/cpu/o3/cpu.cc
+index e161d88..e64777e 100644
+--- a/src/cpu/o3/cpu.cc
++++ b/src/cpu/o3/cpu.cc
+@@ -329,6 +329,10 @@ CPU::regProbePoints()
+     ppDataAccessComplete = new ProbePointArg<
+         std::pair<DynInstPtr, PacketPtr>>(
+                 getProbeManager(), "DataAccessComplete");
++    ppCommittedInst = new ProbePointArg<uint64_t>(
++        getProbeManager(), "CommittedInst");
++    ppCommitBranchMispredict = new ProbePointArg<uint64_t>(
++        getProbeManager(), "CommitBranchMispredict");
+
+     fetch.regProbePoints();
+     rename.regProbePoints();
+diff --git a/src/cpu/o3/cpu.hh b/src/cpu/o3/cpu.hh
+index cc238e5..de65ed2 100644
+--- a/src/cpu/o3/cpu.hh
++++ b/src/cpu/o3/cpu.hh
+@@ -175,6 +175,8 @@ class CPU : public BaseCPU
+
+     ProbePointArg<PacketPtr> *ppInstAccessComplete;
+     ProbePointArg<std::pair<DynInstPtr, PacketPtr> > *ppDataAccessComplete;
++    ProbePointArg<uint64_t> *ppCommittedInst;
++    ProbePointArg<uint64_t> *ppCommitBranchMispredict;
+
+     /** Register probe points. */
+     void regProbePoints() override;
+diff --git a/src/cpu/o3/inst_queue.cc b/src/cpu/o3/inst_queue.cc
+index b3cf330..a3f5a64 100644
+--- a/src/cpu/o3/inst_queue.cc
++++ b/src/cpu/o3/inst_queue.cc
+@@ -93,11 +93,13 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
+       numThreads(params.numThreads),
+       numEntries(params.numIQEntries),
+       totalWidth(params.issueWidth),
+-      commitToIEWDelay(params.commitToIEWDelay),
+-      iqStats(cpu, totalWidth),
+-      iqIOStats(cpu)
++       commitToIEWDelay(params.commitToIEWDelay),
++       iqStats(cpu, totalWidth),
++       iqIOStats(cpu)
+ {
+     assert(fuPool);
++    iqStats.ppSquashedIssued = new ProbePointArg<DynInstPtr>(
++        cpu->getProbeManager(), "SquashedIssued");
+
+     const auto &reg_classes = params.isa[0]->regClasses();
+     // Set the number of total physical registers
+@@ -808,6 +810,7 @@ InstructionQueue::scheduleReadyInsts()
+             listOrder.erase(order_it++);
+
+             ++iqStats.squashedInstsIssued;
++            iqStats.ppSquashedIssued->notify(issuing_inst);
+
+             continue;
+         }
+diff --git a/src/cpu/o3/inst_queue.hh b/src/cpu/o3/inst_queue.hh
+index 57928e7..c8bbf8f 100644
+--- a/src/cpu/o3/inst_queue.hh
++++ b/src/cpu/o3/inst_queue.hh
+@@ -60,6 +60,7 @@
+ #include "cpu/timebuf.hh"
+ #include "enums/SMTQueuePolicy.hh"
+ #include "sim/eventq.hh"
++#include "sim/probe/probe.hh"
+
+ namespace gem5
+ {
+@@ -541,6 +542,7 @@ class InstructionQueue
+         statistics::Vector fuBusy;
+         /** Number of times the FU was busy per instruction issued. */
+         statistics::Formula fuBusyRate;
++        ProbePointArg<DynInstPtr> *ppSquashedIssued;
+     } iqStats;
+
+    public:
+diff --git a/src/mem/cache/base.cc b/src/mem/cache/base.cc
+index cb68610..641c1d8 100644
+--- a/src/mem/cache/base.cc
++++ b/src/mem/cache/base.cc
+@@ -407,6 +407,8 @@ BaseCache::handleTimingReqMiss(PacketPtr pkt, MSHR *mshr, CacheBlk *blk,
+ void
+ BaseCache::recvTimingReq(PacketPtr pkt)
+ {
++    if (pkt->isCleanInvalidateRequest())
++        ppCleanInvalid->notify(pkt);
+     // anything that is merely forwarded pays for the forward latency and
+     // the delay provided by the crossbar
+     Tick forward_time = clockEdge(forwardLatency) + pkt->headerDelay;
+@@ -2528,6 +2530,8 @@ BaseCache::regProbePoints()
+         this->getProbeManager(), "Hit");
+     ppMiss = new ProbePointArg<CacheAccessProbeArg>(
+         this->getProbeManager(), "Miss");
++    ppCleanInvalid = new ProbePointArg<PacketPtr>(
++        this->getProbeManager(), "CleanInvalidReq");
+     ppFill = new ProbePointArg<CacheAccessProbeArg>(
+         this->getProbeManager(), "Fill");
+     ppDataUpdate =
+diff --git a/src/mem/cache/base.hh b/src/mem/cache/base.hh
+index 8c4c3f3..bbaee34 100644
+--- a/src/mem/cache/base.hh
++++ b/src/mem/cache/base.hh
+@@ -367,6 +367,8 @@ class BaseCache : public ClockedObject
+     /** To probe when a cache miss occurs */
+     ProbePointArg<CacheAccessProbeArg> *ppMiss;
+
++    ProbePointArg<PacketPtr> *ppCleanInvalid;
++
+     /** To probe when a cache fill occurs */
+     ProbePointArg<CacheAccessProbeArg> *ppFill;
+
+diff --git a/src/sim/process.cc b/src/sim/process.cc
+index 7b6e2d0..f6dc18c 100644
+--- a/src/sim/process.cc
++++ b/src/sim/process.cc
+@@ -134,6 +134,11 @@ Process::Process(const ProcessParams &params, EmulationPageTable *pTable,
+       ADD_STAT(numSyscalls, statistics::units::Count::get(),
+                "Number of system calls")
+ {
++    ppSyscallEntry = new ProbePointArg<SyscallProbeArg>(
++        getProbeManager(), "SyscallEntry");
++    ppSyscallReturn = new ProbePointArg<SyscallProbeArg>(
++        getProbeManager(), "SyscallReturn");
++    ppFault = new ProbePointArg<uint64_t>(getProbeManager(), "Fault");
+     fatal_if(!seWorkload, "Couldn't find appropriate workload object.");
+     fatal_if(_pid >= System::maxPID, "_pid is too large: %d", _pid);
+
+diff --git a/src/sim/process.hh b/src/sim/process.hh
+index 9d04ccd..35c8333 100644
+--- a/src/sim/process.hh
++++ b/src/sim/process.hh
+@@ -45,6 +45,8 @@
+ #include "sim/fd_entry.hh"
+ #include "sim/mem_state.hh"
+ #include "sim/sim_object.hh"
++#include "sim/probe/probe.hh"
++#include "sim/syscall_probe.hh"
+
+ namespace gem5
+ {
+@@ -78,6 +80,9 @@ class Process : public SimObject
+     DrainState drain() override;
+
+     virtual void syscall(ThreadContext *tc) { numSyscalls++; }
++    ProbePointArg<SyscallProbeArg> *ppSyscallEntry;
++    ProbePointArg<SyscallProbeArg> *ppSyscallReturn;
++    ProbePointArg<uint64_t> *ppFault;
+
+     inline uint64_t uid() { return _uid; }
+     inline uint64_t euid() { return _euid; }
+diff --git a/src/sim/syscall_desc.cc b/src/sim/syscall_desc.cc
+index d293167..0394909 100644
+--- a/src/sim/syscall_desc.cc
++++ b/src/sim/syscall_desc.cc
+@@ -28,6 +28,7 @@
+  */
+
+ #include "sim/syscall_desc.hh"
++#include "sim/syscall_probe.hh"
+
+ #include "base/types.hh"
+ #include "sim/eventq.hh"
+@@ -55,6 +56,8 @@ SyscallDesc::doSyscall(ThreadContext *tc)
+     }
+
+     handleReturn(tc, retval);
++    tc->getProcessPtr()->ppSyscallReturn->notify(
++        {static_cast<int64_t>(_num), retval.encodedValue(), false});
+ }
+
+ void
+@@ -74,6 +77,8 @@ SyscallDesc::retrySyscall(ThreadContext *tc)
+     tc->activate();
+
+     handleReturn(tc, retval);
++    tc->getProcessPtr()->ppSyscallReturn->notify(
++        {static_cast<int64_t>(_num), retval.encodedValue(), false});
+ }
+
+ void
+diff --git a/src/sim/syscall_probe.hh b/src/sim/syscall_probe.hh
+new file mode 100644
+index 0000000..52a031f
+--- /dev/null
++++ b/src/sim/syscall_probe.hh
+@@ -0,0 +1,17 @@
++#ifndef __SIM_SYSCALL_PROBE_HH__
++#define __SIM_SYSCALL_PROBE_HH__
++
++#include "sim/probe/probe.hh"
++
++namespace gem5
++{
++
++struct SyscallProbeArg {
++    int64_t number;
++    int64_t result;
++    bool entering;
++};
++
++} // namespace gem5
++
++#endif
+diff --git a/src/stu/SConscript b/src/stu/SConscript
+new file mode 100644
+index 0000000..9ceb71f
+--- /dev/null
++++ b/src/stu/SConscript
+@@ -0,0 +1,5 @@
++# -*- mode:python -*-
++Import('*')
++
++SimObject('SecurityTelemetryUnit.py', sim_objects=['SecurityTelemetryUnit'])
++Source('security_telemetry_unit.cc')
+diff --git a/src/stu/SecurityTelemetryUnit.py b/src/stu/SecurityTelemetryUnit.py
+new file mode 100644
+index 0000000..0af7317
+--- /dev/null
++++ b/src/stu/SecurityTelemetryUnit.py
+@@ -0,0 +1,15 @@
++from m5.SimObject import SimObject
++from m5.params import Param, Int, String
++from m5.proxy import Parent
++
++class SecurityTelemetryUnit(SimObject):
++    type = "SecurityTelemetryUnit"
++    cxx_class = "gem5::SecurityTelemetryUnit"
++    cxx_header = "stu/security_telemetry_unit.hh"
++
++    cpu = Param.SimObject(Parent.any, "O3 CPU owning commit probes")
++    cache = Param.SimObject(Parent.any, "L1D cache owning cache probes")
++    predictor = Param.SimObject(Parent.any, "Branch predictor owning miss probe")
++    process = Param.SimObject(Parent.any, "SE process owning syscall probes")
++    window_size = Param.Int(100000, "Committed instructions per window")
++    output_file = Param.String("stu-stream.jsonl", "JSONL telemetry output")
+diff --git a/src/stu/security_telemetry_unit.cc b/src/stu/security_telemetry_unit.cc
+new file mode 100644
+index 0000000..ea9c798
+--- /dev/null
++++ b/src/stu/security_telemetry_unit.cc
+@@ -0,0 +1,202 @@
++#include "stu/security_telemetry_unit.hh"
++
++#include "cpu/o3/dyn_inst.hh"
++#include "cpu/o3/commit.hh"
++#include "cpu/o3/iew.hh"
++#include "cpu/o3/cpu.hh"
++#include "mem/cache/base.hh"
++#include "sim/cur_tick.hh"
++#include "sim/sim_exit.hh"
++
++namespace gem5
++{
++
++template <class T, class Arg>
++class ExplicitProbeListener : public ProbeListenerArgBase<Arg>
++{
++    T *object;
++    void (T::*function)(const Arg &);
++
++  public:
++    ExplicitProbeListener(T *obj, ProbeManager *manager, const std::string &name,
++                          void (T::*func)(const Arg &))
++        : ProbeListenerArgBase<Arg>(manager, name), object(obj), function(func)
++    {}
++
++    void notify(const Arg &arg) override { (object->*function)(arg); }
++};
++
++SecurityTelemetryUnit::SecurityTelemetryUnit(
++        const SecurityTelemetryUnitParams &params)
++    : SimObject(params), windowSize(params.window_size),
++      outputFile(params.output_file), window(0), startTick(0), committed(0),
++      totalCommitted(0),
++      cleanInvalid(0), squashEvents(0), squashedIssued(0),
++      branchMispredicts(0), condIncorrect(0), l1dHits(0), l1dMisses(0),
++      firstFlushTick(MaxTick), cpuManager(params.cpu->getProbeManager()),
++      cacheManager(params.cache->getProbeManager()),
++      predictorManager(params.predictor->getProbeManager()),
++      processManager(params.process->getProbeManager()), firstCloneTick(MaxTick),
++      cloneSyscalls(0), setuidSyscalls(0), otherSyscalls(0),
++      cloneReturns(0), setuidReturns(0), otherReturns(0), faults(0)
++{
++    stream.open(outputFile, std::ios::out | std::ios::trunc);
++    if (!stream.is_open())
++        fatal("SecurityTelemetryUnit cannot open %s\n", outputFile);
++    registerExitCallback([this]() { onExit(); });
++}
++
++SecurityTelemetryUnit::~SecurityTelemetryUnit()
++{
++    if (committed)
++        emitWindow();
++    stream.flush();
++}
++
++void
++SecurityTelemetryUnit::regProbeListeners()
++{
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        uint64_t>(this, cpuManager, "CommittedInst", &SecurityTelemetryUnit::onRetired));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        uint64_t>(this, cpuManager, "CommitBranchMispredict", &SecurityTelemetryUnit::onCount));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        uint64_t>(this, predictorManager, "Misses", &SecurityTelemetryUnit::onCondIncorrect));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        SyscallProbeArg>(this, processManager, "SyscallEntry",
++                         &SecurityTelemetryUnit::onSyscallEntry));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        SyscallProbeArg>(this, processManager, "SyscallReturn",
++                         &SecurityTelemetryUnit::onSyscallReturn));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        uint64_t>(this, processManager, "Fault",
++                  &SecurityTelemetryUnit::onFault));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        o3::DynInstConstPtr>(this, cpuManager, "SquashedIssued", &SecurityTelemetryUnit::onSquashedIssued));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        CacheAccessProbeArg>(this, cacheManager, "Hit", &SecurityTelemetryUnit::onHit));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        CacheAccessProbeArg>(this, cacheManager, "Miss", &SecurityTelemetryUnit::onMiss));
++    listeners.push_back(new ExplicitProbeListener<SecurityTelemetryUnit,
++        PacketPtr>(this, cacheManager, "CleanInvalidReq", &SecurityTelemetryUnit::onCleanInvalid));
++}
++
++void SecurityTelemetryUnit::onRetired(const uint64_t &count)
++{
++    committed += count;
++    totalCommitted += count;
++    if (committed >= windowSize)
++        emitWindow();
++}
++void SecurityTelemetryUnit::onSquash(const o3::DynInstConstPtr &) { squashEvents++; }
++void SecurityTelemetryUnit::onSquashedIssued(const o3::DynInstConstPtr &) { squashedIssued++; }
++void SecurityTelemetryUnit::onMispredict(const o3::DynInstConstPtr &) { branchMispredicts++; }
++void SecurityTelemetryUnit::onCount(const uint64_t &count) {
++    branchMispredicts += count;
++    squashEvents += count;
++}
++void SecurityTelemetryUnit::onCondIncorrect(const uint64_t &count) { condIncorrect += count; }
++void SecurityTelemetryUnit::onHit(const CacheAccessProbeArg &arg) {
++    if (!arg.pkt->req->isCacheMaintenance() &&
++        !arg.pkt->cmd.isHWPrefetch() &&
++        (arg.pkt->isRead() || arg.pkt->isWrite()))
++        l1dHits++;
++}
++void SecurityTelemetryUnit::onMiss(const CacheAccessProbeArg &arg) {
++    if (!arg.pkt->req->isCacheMaintenance() &&
++        !arg.pkt->cmd.isHWPrefetch() &&
++        (arg.pkt->isRead() || arg.pkt->isWrite()))
++        l1dMisses++;
++}
++void SecurityTelemetryUnit::onCleanInvalid(const PacketPtr &) {
++    cleanInvalid++;
++    if (firstFlushTick == MaxTick)
++        firstFlushTick = curTick();
++}
++
++void SecurityTelemetryUnit::onSyscallEntry(const SyscallProbeArg &arg)
++{
++    if (arg.number == 56) {
++        cloneSyscalls++;
++        if (firstCloneTick == MaxTick)
++            firstCloneTick = curTick();
++    } else if (arg.number == 105) {
++        setuidSyscalls++;
++    } else {
++        otherSyscalls++;
++    }
++}
++
++void SecurityTelemetryUnit::onSyscallReturn(const SyscallProbeArg &arg)
++{
++    if (arg.number == 56)
++        cloneReturns++;
++    else if (arg.number == 105)
++        setuidReturns++;
++    else
++        otherReturns++;
++}
++
++void SecurityTelemetryUnit::onFault(const uint64_t &count)
++{
++    faults += count;
++}
++
++void SecurityTelemetryUnit::resetWindow()
++{
++    startTick = curTick();
++    committed = cleanInvalid = squashEvents = squashedIssued = 0;
++    branchMispredicts = condIncorrect = l1dHits = l1dMisses = 0;
++    cloneSyscalls = setuidSyscalls = otherSyscalls = 0;
++    cloneReturns = setuidReturns = otherReturns = 0;
++}
++
++void SecurityTelemetryUnit::emitWindow()
++{
++    const double scale = 1000000.0 / (committed ? committed : 1);
++    stream << "{\"window\":" << window++
++           << ",\"start_tick\":" << startTick
++           << ",\"end_tick\":" << curTick()
++           << ",\"committed\":" << committed
++           << ",\"cleanInvalid\":" << cleanInvalid
++           << ",\"squashEvents\":" << squashEvents
++           << ",\"squashedIssued\":" << squashedIssued
++           << ",\"branchMispredicts\":" << branchMispredicts
++           << ",\"condIncorrect\":" << condIncorrect
++           << ",\"l1dHits\":" << l1dHits
++           << ",\"l1dMisses\":" << l1dMisses
++           << ",\"syscalls\":{\"clone\":" << cloneSyscalls
++           << ",\"setuid\":" << setuidSyscalls
++           << ",\"other\":" << otherSyscalls << "}"
++           << ",\"syscallReturns\":{\"clone\":" << cloneReturns
++           << ",\"setuid\":" << setuidReturns
++           << ",\"other\":" << otherReturns << "}"
++           << ",\"faults\":" << faults
++           << ",\"rates\":{\"cleanInvalidPerMinst\":"
++           << cleanInvalid * scale
++           << ",\"squashedIssuedPerMinst\":" << squashedIssued * scale
++           << ",\"mispredRate\":"
++           << (committed ? condIncorrect / double(committed) : 0.0)
++           << ",\"l1dMissRate\":"
++           << (l1dHits + l1dMisses ?
++                l1dMisses / double(l1dHits + l1dMisses) : 0.0)
++           << ",\"cloneSyscallsPerMinst\":" << cloneSyscalls * scale
++           << ",\"setuidSyscallsPerMinst\":" << setuidSyscalls * scale
++           << "},\"firstFlushTick\":"
++           << (firstFlushTick == MaxTick ? 0 : firstFlushTick)
++           << ",\"firstCloneTick\":"
++           << (firstCloneTick == MaxTick ? 0 : firstCloneTick) << "}\n";
++    stream.flush();
++    resetWindow();
++}
++
++void SecurityTelemetryUnit::onExit()
++{
++    if (committed || cleanInvalid || squashEvents || squashedIssued ||
++        branchMispredicts || condIncorrect || l1dHits || l1dMisses ||
++        faults)
++        emitWindow();
++    stream.flush();
++}
++
++} // namespace gem5
+diff --git a/src/stu/security_telemetry_unit.hh b/src/stu/security_telemetry_unit.hh
+new file mode 100644
+index 0000000..12ea88d
+--- /dev/null
++++ b/src/stu/security_telemetry_unit.hh
+@@ -0,0 +1,73 @@
++#ifndef __STU_SECURITY_TELEMETRY_UNIT_HH__
++#define __STU_SECURITY_TELEMETRY_UNIT_HH__
++
++#include <fstream>
++
++#include "mem/cache/cache_probe_arg.hh"
++#include "sim/syscall_probe.hh"
++#include "cpu/o3/dyn_inst_ptr.hh"
++#include "params/SecurityTelemetryUnit.hh"
++#include "sim/probe/probe.hh"
++#include "sim/sim_object.hh"
++
++namespace gem5
++{
++
++class SecurityTelemetryUnit : public SimObject
++{
++  private:
++    ProbeManager *cpuManager;
++    ProbeManager *cacheManager;
++    ProbeManager *predictorManager;
++    ProbeManager *processManager;
++    const int windowSize;
++    const std::string outputFile;
++    std::ofstream stream;
++    uint64_t window;
++    uint64_t startTick;
++    uint64_t committed;
++    uint64_t totalCommitted;
++    uint64_t cleanInvalid;
++    uint64_t squashEvents;
++    uint64_t squashedIssued;
++    uint64_t branchMispredicts;
++    uint64_t condIncorrect;
++    uint64_t l1dHits;
++    uint64_t l1dMisses;
++    Tick firstFlushTick;
++    Tick firstCloneTick;
++    uint64_t cloneSyscalls;
++    uint64_t setuidSyscalls;
++    uint64_t otherSyscalls;
++    uint64_t cloneReturns;
++    uint64_t setuidReturns;
++    uint64_t otherReturns;
++    uint64_t faults;
++
++    std::vector<ProbeListener *> listeners;
++
++    void onRetired(const uint64_t &count);
++    void onSquash(const o3::DynInstConstPtr &inst);
++    void onSquashedIssued(const o3::DynInstConstPtr &inst);
++    void onMispredict(const o3::DynInstConstPtr &inst);
++    void onCount(const uint64_t &count);
++    void onCondIncorrect(const uint64_t &count);
++    void onExit();
++    void onHit(const CacheAccessProbeArg &arg);
++    void onMiss(const CacheAccessProbeArg &arg);
++    void onCleanInvalid(const PacketPtr &pkt);
++    void onSyscallEntry(const SyscallProbeArg &arg);
++    void onSyscallReturn(const SyscallProbeArg &arg);
++    void onFault(const uint64_t &count);
++    void emitWindow();
++    void resetWindow();
++
++  public:
++    SecurityTelemetryUnit(const SecurityTelemetryUnitParams &params);
++    ~SecurityTelemetryUnit() override;
++    void regProbeListeners() override;
++};
++
++} // namespace gem5
++
++#endif

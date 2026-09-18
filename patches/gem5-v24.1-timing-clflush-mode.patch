@@ -1,0 +1,26 @@
+From cf949085ff85c4d3080f50a03514bffb619b6343 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] arch-x86: preserve translation mode for cache clean callback
+
+Backport of gem5 upstream commit cf949085 for v24.1.0.0. X86 cache-clean
+requests use read permissions during translation, but TimingSimpleCPU creates
+the translation state as a write. Pass the original mode to finish() so the
+callback remains consistent with WholeTranslationState.
+
+--- a/src/arch/x86/tlb.cc
++++ b/src/arch/x86/tlb.cc
+@@ -559,13 +559,14 @@ TLB::translateTiming(const RequestPtr &req, ThreadContext *tc,
+ {
+     bool delayedResponse;
+     assert(translation);
+     // CLFLUSHOPT/WB/FLUSH should be treated as read for protection checks
++    BaseMMU::Mode orig_mode = mode;
+     if (req->isCacheClean())
+         mode = BaseMMU::Read;
+     Fault fault =
+         TLB::translate(req, tc, translation, mode, delayedResponse, true);
+     if (!delayedResponse)
+-        translation->finish(fault, req, tc, mode);
++        translation->finish(fault, req, tc, orig_mode);
+     else
+         translation->markDelayed();
+ }
