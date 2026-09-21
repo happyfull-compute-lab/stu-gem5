@@ -66,3 +66,21 @@ for bp in local tournament; do
     run_one "benign-privdrop-${bp}" 50000 --cpu o3 --bp "$bp" --stu \
         --window 50000 --binary benign_privdrop
 done
+
+# E1 realistic application control (static file indexer, 3 reps x 2 BPs)
+for bp in local tournament; do
+    run_one "benign-file-index-${bp}" 50000 --cpu o3 --bp "$bp" --stu \
+        --window 50000 --binary benign_file_index /usr/include
+    run_one "benign-file-index-${bp}-r2" 50000 --cpu o3 --bp "$bp" --stu \
+        --window 50000 --binary benign_file_index /usr/include
+    run_one "benign-file-index-${bp}-r3" 50000 --cpu o3 --bp "$bp" --stu \
+        --window 50000 --binary benign_file_index /usr/include
+done
+
+# E2/E3 numeric-audit baseline and adaptive variants (jitter seed 0)
+run_one e2-baseline 50000 --cpu o3 --bp local --stu --window 50000 \
+    --binary spectre_v1_fr 8 10 0 0 1 0
+run_one e3-sparse-flush 50000 --cpu o3 --bp local --stu --window 50000 \
+    --binary spectre_v1_fr 8 10 8 0 4 0
+run_one e3-long-gap 50000 --cpu o3 --bp local --stu --window 50000 \
+    --binary spectre_v1_fr 8 10 0 0 1 2000

@@ -46,9 +46,12 @@ for directory in sorted(p for p in BASE.iterdir() if p.is_dir()):
     setuid_alerts = policy_alerts(directory, "P-SETUID-EXHAUST-1")
     stdout = (directory / "stdout.txt").read_text()
     accuracy = re.search(r"accuracy=(\d+/\d+)", stdout)
+    first_success = re.search(r"first-success byte=(\d+) guest_tsc=(\d+)", stdout)
     rows.append({
         "run": directory.name,
         "accuracy": accuracy.group(1) if accuracy else "n/a",
+        "first_success_byte": int(first_success.group(1)) if first_success else None,
+        "first_success_tsc": int(first_success.group(2)) if first_success else None,
         "windows": len(stream),
         "stu_committed": sum(x["committed"] for x in stream),
         "stu_cleanInvalid": sum(x["cleanInvalid"] for x in stream),
@@ -80,6 +83,14 @@ for directory in sorted(p for p in BASE.iterdir() if p.is_dir()):
             (x.get("rates", {}).get("cloneSyscallsPerMinst", 0) for x in stream),
             default=0,
         ),
+        "maxSquashedIssuedPerMinst": max(
+            (x.get("rates", {}).get("squashedIssuedPerMinst", 0) for x in stream),
+            default=0,
+        ),
+        "maxCleanInvalidPerMinst": max(
+            (x.get("rates", {}).get("cleanInvalidPerMinst", 0) for x in stream),
+            default=0,
+        ),
         "policies": sorted(read_policies(directory)),
         "simTicks": int(stats.get("simTicks", 0)),
         "hostSeconds": stats.get("hostSeconds", 0),
@@ -105,6 +116,7 @@ spectre_rows = [r for r in rows if r["run"].startswith("attack-") and
                 not r["run"].startswith("attack-setuid-") and
                 r["run"] != "attack-local-nostu"]
 benign_rows = [r for r in rows if r["run"].startswith("benign-")]
+file_index_rows = [r for r in rows if r["run"].startswith("benign-file-index-")]
 
 
 on = get("attack-local")
@@ -148,6 +160,58 @@ lines += [
     "The software policy is `cloneSyscallsPerMinst > 100` AND "
     "`setuidSyscallsPerMinst > 0`. It first alerts in window 10 for both "
     "software attack runs, during the storm phase.", "",
+    "## E1 Realistic Application Control", "",
+    "The added workload is a statically linked file-indexing application. It "
+    "recursively scans `/usr/include` to depth two and performs `lstat`, "
+    "`opendir/readdir`, `open`, `read`, and `close` operations. It processed "
+    "2,714 files and 6,569,397 bytes per run. The host tools suggested for "
+    "this experiment were not used because `/bin/ls`, `find`, `grep`, `sort`, "
+    "and `tar` are dynamically linked host binaries and are not portable SE "
+    "workloads.", "",
+    "| BP | repetitions | squashedIssued peak mean / Minst | peak | "
+    "CleanInvalidReq peak / Minst | policy alerts |",
+    "|---|---:|---:|---:|---:|---:|",
+]
+for bp in ("local", "tournament"):
+    selected = [r for r in file_index_rows if f"-{bp}" in r["run"]]
+    lines.append(
+        f"| {bp} | {len(selected)} | "
+        f"{sum(r['maxSquashedIssuedPerMinst'] for r in selected) / len(selected):.2f} | "
+        f"{max(r['maxSquashedIssuedPerMinst'] for r in selected):.2f} | "
+        f"{max(r['maxCleanInvalidPerMinst'] for r in selected):.2f} | "
+        f"{sum(r['alerts'] for r in selected)} |"
+    )
+lines += [
+    "", "The file-index workload exceeds the standalone wrong-path threshold "
+    "(`squashedIssued > 1,000/Minst`) but generates no cache-clean traffic. "
+    "The joint Spectre policy therefore produces zero alerts in all six runs. "
+    "This is a realistic application-style control, not a SPEC CPU benchmark.", "",
+    "## E2 Numeric Audit", "",
+    "For `attack-local`, `simFreq=1,000,000,000,000 ticks/s`, `simTicks=2,142,358,164`, "
+    "and `simInsts=2,336,530`. Simulated time is `0.002142358164 s`; equivalent "
+    "3 GHz CPU cycles are `6,427,074.492`; instructions per equivalent CPU cycle "
+    "are `0.363545`. The refreshed E2 baseline first alerts in window 2 at tick "
+    "`58,309,965`. The PoC first-success marker is `byte=0`, with guest TSC "
+    "reported separately; guest TSC is not comparable to gem5 ticks.", "",
+    "## E3 Adaptive Variants", "",
+    "| run | change | accuracy | first success byte | first alert window | max flush / Minst | max squash / Minst |",
+    "|---|---|---:|---:|---:|---:|---:|",
+]
+for name, change in (("e2-baseline", "original"), ("e3-sparse-flush", "flush stride 4"), ("e3-long-gap", "attack gap 2000")):
+    row = get(name)
+    lines.append(f"| {name} | {change} | {row['accuracy']} | {row['first_success_byte'] if row['first_success_byte'] is not None else 'none'} | {row['firstAlertWindow'] if row['firstAlertWindow'] is not None else 'none'} | {row['maxCleanInvalidPerMinst']:.2f} | {row['maxSquashedIssuedPerMinst']:.2f} |")
+lines += [
+    "", "The sparse-flush variant produced `0/8` and no alert, documenting a "
+    "known false-negative adaptive case. The longer-gap variant retained `8/8` "
+    "and was detected.", "",
+    "## E4 Holdout and Limits", "",
+    "The policies were locked before the E2/E3 runs. Existing LTAGE/BiModeBP, "
+    "jitter, file-index, and adaptive runs are treated as held-out families. "
+    "The fixed policy remains zero-FP on benign groups; sparse flush is the "
+    "known false-negative case. BusyBox `sort` aborted on unimplemented "
+    "`setgid(#106)`, and the pthread workload created zero threads because SE "
+    "had no spare thread context. Real `make -j` and scheduler experiments "
+    "require FS and a separate baseline.", "",
     "## Threshold Margin", "",
     "| workload | maximum clone density / Minst | threshold | margin |",
     "|---|---:|---:|---:|",
@@ -167,9 +231,9 @@ for row in rows:
     )
 lines += [
     "", "## Reproduction", "", "```bash",
-    "python3 -m venv venv",
-    "venv/bin/pip install 'SCons<4.9'",
-    "venv/bin/scons -C gem5 build/X86/gem5.opt -j16",
+    "python3 -m venv /tmp/opencode/gem5-venv",
+    "/tmp/opencode/gem5-venv/bin/pip install 'SCons<4.9'",
+    "/tmp/opencode/gem5-venv/bin/scons -C gem5 build/X86/gem5.opt -j16",
     "gcc -O2 -static attack_setuid_exhaust.c -o attack_setuid_exhaust",
     "gcc -O2 -static benign_proc_mix.c -o benign_proc_mix",
     "gcc -O2 -static benign_privdrop.c -o benign_privdrop",

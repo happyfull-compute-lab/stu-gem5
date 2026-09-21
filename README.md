@@ -10,8 +10,8 @@ record against all detection policies described in an external policy file.
 Attaching the STU does not alter simulated timing: cycle counts and
 instruction counts are bit-identical with the STU attached or detached.
 
-Two attacks and seven benign workloads are included, together with the full
-experiment matrix runner and result summaries.
+Two attacks and eight benign workloads are included, together with the full
+experiment matrix runner, adaptive-variant runs, and result summaries.
 
 ## The Two Attacks
 
@@ -30,9 +30,10 @@ reload became fast reveals the secret byte. The program first runs a
 calibration pass to set the hit/miss latency threshold, then recovers an
 8-byte secret and reports per-byte results and overall accuracy.
 
-Optional jitter arguments (`8 10 0 <seed>`) insert between 0 and 31 extra
-training calls before each attack round, producing distinct execution
-streams under a fixed configuration.
+Optional arguments extend the base form `8 10`: jitter (`8 10 <range> <seed>`,
+range 0 selects 32), flush stride (`... <stride>`, flush only every Nth
+probe line) and attack gap (`... <gap>`, extra delay loop between rounds)
+support randomized and adaptive-variant runs.
 
 ### setuid exhaustion (`attack_setuid_exhaust.c`)
 
@@ -58,6 +59,8 @@ resources are involved.
 | `benign_flush` | Legitimate `clflush` pressure (12,800 flushes) |
 | `benign_proc_mix` | Sparse process creation plus syscalls |
 | `benign_privdrop` | Moderate-rate process creation plus `setuid()` drops |
+| `benign_file_index` | Realistic static indexer: recursive `/usr/include` scan, lstat/opendir/read |
+| `benign_pthread` | Threaded control (SE capability test; creates zero threads on one-core SE) |
 
 ## Repository Layout
 
@@ -142,7 +145,7 @@ Detection results over the full matrix (details in `results/stu-REPORT.md`):
 |---|---:|---:|
 | Spectre attack runs (11) | 11 detected | 0 false positives |
 | setuid-exhaustion runs (2) | 0 false positives | 2 detected |
-| Benign runs (12) | 0 false positives | 0 false positives |
+| Benign runs (18: 12 synthetic + 6 file-index) | 0 false positives | 0 false positives |
 
 - Detection latency: 14.3–16.6 us (Spectre) and 60.1–64.5 us (setuid) with
   50k-instruction windows; 261.5 us with 200k-instruction windows.

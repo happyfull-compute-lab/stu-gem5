@@ -2,7 +2,8 @@ CC ?= gcc
 GEM5 ?= gem5/build/X86/gem5.opt
 
 BINS = flush_test spectre_v1_fr benign_compute benign_cache benign_syscall \
-       benign_flush benign_proc_mix benign_privdrop attack_setuid_exhaust
+       benign_flush benign_proc_mix benign_privdrop benign_file_index \
+       benign_pthread attack_setuid_exhaust
 
 .PHONY: all clean flush-check spectre-check
 
@@ -31,6 +32,12 @@ benign_proc_mix: benign_proc_mix.c
 
 benign_privdrop: benign_privdrop.c
 	$(CC) -O2 -static -o $@ $<
+
+benign_file_index: benign_file_index.c
+	$(CC) -O2 -static -o $@ $<
+
+benign_pthread: benign_pthread.c
+	$(CC) -O2 -static -o $@ $< -lpthread
 
 attack_setuid_exhaust: attack_setuid_exhaust.c
 	$(CC) -O2 -static -o $@ $<

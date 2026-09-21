@@ -7,6 +7,8 @@
 /benign_flush
 /benign_proc_mix
 /benign_privdrop
+/benign_file_index
+/benign_pthread
 /attack_setuid_exhaust
 
 # simulator outputs and environments
