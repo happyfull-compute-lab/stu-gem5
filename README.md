@@ -1,7 +1,9 @@
-# STU-gem5: Security Telemetry Unit Prototype on gem5
+# STU-gem5: Security-Native Telemetry Unit Prototype on gem5
 
-This repository contains a Security Telemetry Unit (STU) prototype built on
-the gem5 simulator. The STU is a bypass-probe-based on-chip-style component:
+This repository contains a Security-Native Telemetry Unit (STU) prototype
+built on the gem5 simulator. (STU = Security-Native Telemetry Unit; the
+underlying design concept is security-native telemetry.) The STU is a
+bypass-probe-based on-chip-style component:
 it counts security-relevant runtime events on the CPU, cache, and syscall
 paths, aggregates them into fixed-size sliding windows of committed
 instructions, and streams one JSON summary record per window to a file. An
